@@ -52,6 +52,7 @@ _custom_logger_compatible_callbacks_literal = Literal[
     "braintrust",
     "arize",
     "gcs_bucket",
+    "opik",
 ]
 _known_custom_logger_compatible_callbacks: List = list(
     get_args(_custom_logger_compatible_callbacks_literal)
@@ -504,11 +505,13 @@ openai_compatible_providers: List = [
     "azure_ai",
     "github",
     "litellm_proxy",
+    "hosted_vllm",
 ]
 openai_text_completion_compatible_providers: List = (
     [  # providers that support `/v1/completions`
         "together_ai",
         "fireworks_ai",
+        "hosted_vllm",
     ]
 )
 
@@ -758,6 +761,7 @@ class LlmProviders(str, Enum):
     GITHUB = "github"
     CUSTOM = "custom"
     LITELLM_PROXY = "litellm_proxy"
+    HOSTED_VLLM = "hosted_vllm"
 
 
 provider_list: List[Union[LlmProviders, str]] = list(LlmProviders)
@@ -1003,6 +1007,8 @@ from .llms.AzureOpenAI.azure import (
     AzureOpenAIError,
     AzureOpenAIAssistantsAPIConfig,
 )
+from .llms.hosted_vllm.chat.transformation import HostedVLLMChatConfig
+from .llms.AzureOpenAI.chat.o1_transformation import AzureOpenAIO1Config
 from .llms.watsonx import IBMWatsonXAIConfig
 from .main import *  # type: ignore
 from .integrations import *

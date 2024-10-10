@@ -14,7 +14,6 @@ import binascii
 import copy
 import datetime
 import hashlib
-import imghdr
 import inspect
 import io
 import itertools
@@ -1800,6 +1799,25 @@ def calculate_tiles_needed(
     total_tiles = tiles_across * tiles_down
     return total_tiles
 
+def get_image_type(image_data: bytes) -> Union[str, None]:
+    """ take an image (really only the first ~100 bytes max are needed)
+    and return 'png' 'gif' 'jpeg' 'heic' or None. method added to
+    allow deprecation of imghdr in 3.13"""
+
+    if image_data[0:8] == b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a":
+        return "png"
+
+    if image_data[0:4] == b"GIF8" and image_data[5:6] == b"a":
+        return "gif"
+
+    if image_data[0:3] == b"\xff\xd8\xff":
+        return "jpeg"
+
+    if image_data[4:8] == b"ftyp":
+        return "heic"
+
+    return None
+
 
 def get_image_dimensions(data):
     img_data = None
@@ -1815,7 +1833,7 @@ def get_image_dimensions(data):
         header, encoded = data.split(",", 1)
         img_data = base64.b64decode(encoded)
 
-    img_type = imghdr.what(None, h=img_data)
+    img_type = get_image_type(img_data)
 
     if img_type == "png":
         w, h = struct.unpack(">LL", img_data[16:24])
@@ -2771,6 +2789,11 @@ def get_optional_params_embeddings(
 
 
 def _remove_additional_properties(schema):
+    """
+    clean out 'additionalProperties = False'. Causes vertexai/gemini OpenAI API Schema errors - https://github.com/langchain-ai/langchainjs/issues/5240
+
+    Relevant Issues: https://github.com/BerriAI/litellm/issues/6136, https://github.com/BerriAI/litellm/issues/6088
+    """
     if isinstance(schema, dict):
         # Remove the 'additionalProperties' key if it exists and is set to False
         if "additionalProperties" in schema and schema["additionalProperties"] is False:
@@ -2784,6 +2807,27 @@ def _remove_additional_properties(schema):
         # Recursively process all items in the list
         for item in schema:
             _remove_additional_properties(item)
+
+    return schema
+
+
+def _remove_strict_from_schema(schema):
+    """
+    Relevant Issues: https://github.com/BerriAI/litellm/issues/6136, https://github.com/BerriAI/litellm/issues/6088
+    """
+    if isinstance(schema, dict):
+        # Remove the 'additionalProperties' key if it exists and is set to False
+        if "strict" in schema:
+            del schema["strict"]
+
+        # Recursively process all dictionary values
+        for key, value in schema.items():
+            _remove_strict_from_schema(value)
+
+    elif isinstance(schema, list):
+        # Recursively process all items in the list
+        for item in schema:
+            _remove_strict_from_schema(item)
 
     return schema
 
@@ -2982,31 +3026,6 @@ def get_optional_params(
         non_default_params["response_format"] = type_to_response_format_param(
             response_format=non_default_params["response_format"]
         )
-        # # clean out 'additionalProperties = False'. Causes vertexai/gemini OpenAI API Schema errors - https://github.com/langchain-ai/langchainjs/issues/5240
-        if (
-            non_default_params["response_format"] is not None
-            and non_default_params["response_format"]
-            .get("json_schema", {})
-            .get("schema")
-            is not None
-            and custom_llm_provider
-            in [
-                "gemini",
-                "vertex_ai",
-                "vertex_ai_beta",
-            ]
-        ):
-            from litellm.llms.vertex_ai_and_google_ai_studio.common_utils import (
-                _build_vertex_schema,
-            )
-            old_schema = copy.deepcopy(
-                non_default_params["response_format"]
-                .get("json_schema", {})
-                .get("schema")
-            )
-            new_schema = _remove_additional_properties(schema=old_schema)
-            new_schema = _build_vertex_schema(parameters=new_schema)
-            non_default_params["response_format"]["json_schema"]["schema"] = new_schema
     if "tools" in non_default_params and isinstance(
         non_default_params, list
     ):  # fixes https://github.com/BerriAI/litellm/issues/4933
@@ -3173,7 +3192,7 @@ def get_optional_params(
 
         if stream:
             optional_params["stream"] = stream
-            return optional_params
+            # return optional_params
         if max_tokens is not None:
             if "vicuna" in model or "flan" in model:
                 optional_params["max_length"] = max_tokens
@@ -3767,6 +3786,21 @@ def get_optional_params(
             optional_params=optional_params,
             model=model,
         )
+    elif custom_llm_provider == "hosted_vllm":
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
+        _check_valid_arg(supported_params=supported_params)
+        optional_params = litellm.HostedVLLMChatConfig().map_openai_params(
+            non_default_params=non_default_params,
+            optional_params=optional_params,
+            model=model,
+            drop_params=(
+                drop_params
+                if drop_params is not None and isinstance(drop_params, bool)
+                else False
+            ),
+        )
 
     elif custom_llm_provider == "groq":
         supported_params = get_supported_openai_params(
@@ -3926,24 +3960,36 @@ def get_optional_params(
             model=model, custom_llm_provider="azure"
         )
         _check_valid_arg(supported_params=supported_params)
-        verbose_logger.debug(
-            "Azure optional params - api_version: api_version={}, litellm.api_version={}, os.environ['AZURE_API_VERSION']={}".format(
-                api_version, litellm.api_version, get_secret("AZURE_API_VERSION")
+        if litellm.AzureOpenAIO1Config().is_o1_model(model=model):
+            optional_params = litellm.AzureOpenAIO1Config().map_openai_params(
+                non_default_params=non_default_params,
+                optional_params=optional_params,
+                model=model,
+                drop_params=(
+                    drop_params
+                    if drop_params is not None and isinstance(drop_params, bool)
+                    else False
+                ),
             )
-        )
-        api_version = (
-            api_version
-            or litellm.api_version
-            or get_secret("AZURE_API_VERSION")
-            or litellm.AZURE_DEFAULT_API_VERSION
-        )
-        optional_params = litellm.AzureOpenAIConfig().map_openai_params(
-            non_default_params=non_default_params,
-            optional_params=optional_params,
-            model=model,
-            api_version=api_version,  # type: ignore
-            drop_params=drop_params,
-        )
+        else:
+            verbose_logger.debug(
+                "Azure optional params - api_version: api_version={}, litellm.api_version={}, os.environ['AZURE_API_VERSION']={}".format(
+                    api_version, litellm.api_version, get_secret("AZURE_API_VERSION")
+                )
+            )
+            api_version = (
+                api_version
+                or litellm.api_version
+                or get_secret("AZURE_API_VERSION")
+                or litellm.AZURE_DEFAULT_API_VERSION
+            )
+            optional_params = litellm.AzureOpenAIConfig().map_openai_params(
+                non_default_params=non_default_params,
+                optional_params=optional_params,
+                model=model,
+                api_version=api_version,  # type: ignore
+                drop_params=drop_params,
+            )
     else:  # assume passing in params for text-completion openai
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider="custom_openai"
@@ -4409,6 +4455,8 @@ def get_supported_openai_params(
             "extra_headers",
             "extra_body",
         ]
+    elif custom_llm_provider == "hosted_vllm":
+        return litellm.HostedVLLMChatConfig().get_supported_openai_params(model=model)
     elif custom_llm_provider == "deepseek":
         return [
             # https://platform.deepseek.com/api-docs/api/create-chat-completion
@@ -4465,7 +4513,12 @@ def get_supported_openai_params(
     elif custom_llm_provider == "openai":
         return litellm.OpenAIConfig().get_supported_openai_params(model=model)
     elif custom_llm_provider == "azure":
-        return litellm.AzureOpenAIConfig().get_supported_openai_params()
+        if litellm.AzureOpenAIO1Config().is_o1_model(model=model):
+            return litellm.AzureOpenAIO1Config().get_supported_openai_params(
+                model=model
+            )
+        else:
+            return litellm.AzureOpenAIConfig().get_supported_openai_params()
     elif custom_llm_provider == "openrouter":
         return [
             "temperature",
@@ -4842,6 +4895,10 @@ def _strip_model_name(model: str) -> str:
     return strip_finetune
 
 
+def _get_model_info_from_model_cost(key: str) -> dict:
+    return litellm.model_cost[key]
+
+
 def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> ModelInfo:
     """
     Get a dict for the maximum tokens (context window), input_cost_per_token, output_cost_per_token  for a given model.
@@ -4983,14 +5040,16 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
             """
             Check if: (in order of specificity)
             1. 'custom_llm_provider/model' in litellm.model_cost. Checks "groq/llama3-8b-8192" if model="llama3-8b-8192" and custom_llm_provider="groq"
-            2. 'combined_stripped_model_name' in litellm.model_cost. Checks if 'gemini/gemini-1.5-flash' in model map, if 'gemini/gemini-1.5-flash-001' given.
-            3. 'stripped_model_name' in litellm.model_cost. Checks if 'ft:gpt-3.5-turbo' in model map, if 'ft:gpt-3.5-turbo:my-org:custom_suffix:id' given.
-            4. 'model' in litellm.model_cost. Checks "groq/llama3-8b-8192" in  litellm.model_cost if model="groq/llama3-8b-8192" and custom_llm_provider=None
+            2. 'model' in litellm.model_cost. Checks "gemini-1.5-pro-002" in  litellm.model_cost if model="gemini-1.5-pro-002" and custom_llm_provider=None
+            3. 'combined_stripped_model_name' in litellm.model_cost. Checks if 'gemini/gemini-1.5-flash' in model map, if 'gemini/gemini-1.5-flash-001' given.
+            4. 'stripped_model_name' in litellm.model_cost. Checks if 'ft:gpt-3.5-turbo' in model map, if 'ft:gpt-3.5-turbo:my-org:custom_suffix:id' given.
             5. 'split_model' in litellm.model_cost. Checks "llama3-8b-8192" in litellm.model_cost if model="groq/llama3-8b-8192"
             """
+            _model_info: Optional[Dict[str, Any]] = None
+            key: Optional[str] = None
             if combined_model_name in litellm.model_cost:
                 key = combined_model_name
-                _model_info = litellm.model_cost[combined_model_name]
+                _model_info = _get_model_info_from_model_cost(key=key)
                 _model_info["supported_openai_params"] = supported_openai_params
                 if (
                     "litellm_provider" in _model_info
@@ -5001,58 +5060,10 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
                     ].startswith("vertex_ai"):
                         pass
                     else:
-                        raise Exception
-            elif combined_stripped_model_name in litellm.model_cost:
-                key = combined_stripped_model_name
-                _model_info = litellm.model_cost[combined_stripped_model_name]
-                _model_info["supported_openai_params"] = supported_openai_params
-                if (
-                    "litellm_provider" in _model_info
-                    and _model_info["litellm_provider"] != custom_llm_provider
-                ):
-                    if custom_llm_provider == "vertex_ai" and _model_info[
-                        "litellm_provider"
-                    ].startswith("vertex_ai"):
-                        pass
-                    elif custom_llm_provider == "fireworks_ai" and _model_info[
-                        "litellm_provider"
-                    ].startswith("fireworks_ai"):
-                        pass
-                    else:
-                        raise Exception(
-                            "Got provider={}, Expected provider={}, for model={}".format(
-                                _model_info["litellm_provider"],
-                                custom_llm_provider,
-                                model,
-                            )
-                        )
-            elif stripped_model_name in litellm.model_cost:
-                key = stripped_model_name
-                _model_info = litellm.model_cost[stripped_model_name]
-                _model_info["supported_openai_params"] = supported_openai_params
-                if (
-                    "litellm_provider" in _model_info
-                    and _model_info["litellm_provider"] != custom_llm_provider
-                ):
-                    if custom_llm_provider == "vertex_ai" and _model_info[
-                        "litellm_provider"
-                    ].startswith("vertex_ai"):
-                        pass
-                    elif custom_llm_provider == "fireworks_ai" and _model_info[
-                        "litellm_provider"
-                    ].startswith("fireworks_ai"):
-                        pass
-                    else:
-                        raise Exception(
-                            "Got provider={}, Expected provider={}, for model={}".format(
-                                _model_info["litellm_provider"],
-                                custom_llm_provider,
-                                model,
-                            )
-                        )
-            elif model in litellm.model_cost:
+                        _model_info = None
+            if _model_info is None and model in litellm.model_cost:
                 key = model
-                _model_info = litellm.model_cost[model]
+                _model_info = _get_model_info_from_model_cost(key=key)
                 _model_info["supported_openai_params"] = supported_openai_params
                 if (
                     "litellm_provider" in _model_info
@@ -5067,10 +5078,50 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
                     ].startswith("fireworks_ai"):
                         pass
                     else:
-                        raise Exception
-            elif split_model in litellm.model_cost:
+                        _model_info = None
+            if (
+                _model_info is None
+                and combined_stripped_model_name in litellm.model_cost
+            ):
+                key = combined_stripped_model_name
+                _model_info = _get_model_info_from_model_cost(key=key)
+                _model_info["supported_openai_params"] = supported_openai_params
+                if (
+                    "litellm_provider" in _model_info
+                    and _model_info["litellm_provider"] != custom_llm_provider
+                ):
+                    if custom_llm_provider == "vertex_ai" and _model_info[
+                        "litellm_provider"
+                    ].startswith("vertex_ai"):
+                        pass
+                    elif custom_llm_provider == "fireworks_ai" and _model_info[
+                        "litellm_provider"
+                    ].startswith("fireworks_ai"):
+                        pass
+                    else:
+                        _model_info = None
+            if _model_info is None and stripped_model_name in litellm.model_cost:
+                key = stripped_model_name
+                _model_info = _get_model_info_from_model_cost(key=key)
+                _model_info["supported_openai_params"] = supported_openai_params
+                if (
+                    "litellm_provider" in _model_info
+                    and _model_info["litellm_provider"] != custom_llm_provider
+                ):
+                    if custom_llm_provider == "vertex_ai" and _model_info[
+                        "litellm_provider"
+                    ].startswith("vertex_ai"):
+                        pass
+                    elif custom_llm_provider == "fireworks_ai" and _model_info[
+                        "litellm_provider"
+                    ].startswith("fireworks_ai"):
+                        pass
+                    else:
+                        _model_info = None
+
+            if _model_info is None and split_model in litellm.model_cost:
                 key = split_model
-                _model_info = litellm.model_cost[split_model]
+                _model_info = _get_model_info_from_model_cost(key=key)
                 _model_info["supported_openai_params"] = supported_openai_params
                 if (
                     "litellm_provider" in _model_info
@@ -5085,8 +5136,8 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
                     ].startswith("fireworks_ai"):
                         pass
                     else:
-                        raise Exception
-            else:
+                        _model_info = None
+            if _model_info is None or key is None:
                 raise ValueError(
                     "This model isn't mapped yet. Add it here - https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json"
                 )
@@ -5154,7 +5205,7 @@ def get_model_info(model: str, custom_llm_provider: Optional[str] = None) -> Mod
                 litellm_provider=_model_info.get(
                     "litellm_provider", custom_llm_provider
                 ),
-                mode=_model_info.get("mode"),
+                mode=_model_info.get("mode"),  # type: ignore
                 supported_openai_params=supported_openai_params,
                 supports_system_messages=_model_info.get(
                     "supports_system_messages", None
@@ -7186,34 +7237,6 @@ class CustomStreamWrapper:
         except Exception as e:
             raise e
 
-    def handle_bedrock_stream(self, chunk):
-        return {
-            "text": chunk["text"],
-            "is_finished": chunk["is_finished"],
-            "finish_reason": chunk["finish_reason"],
-        }
-
-    def handle_sagemaker_stream(self, chunk):
-        if "data: [DONE]" in chunk:
-            text = ""
-            is_finished = True
-            finish_reason = "stop"
-            return {
-                "text": text,
-                "is_finished": is_finished,
-                "finish_reason": finish_reason,
-            }
-        elif isinstance(chunk, dict):
-            if chunk["is_finished"] is True:
-                finish_reason = "stop"
-            else:
-                finish_reason = ""
-            return {
-                "text": chunk["text"],
-                "is_finished": chunk["is_finished"],
-                "finish_reason": finish_reason,
-            }
-
     def handle_watsonx_stream(self, chunk):
         try:
             if isinstance(chunk, dict):
@@ -7361,6 +7384,10 @@ class CustomStreamWrapper:
             model_response._hidden_params = hidden_params
         model_response._hidden_params["custom_llm_provider"] = _logging_obj_llm_provider
         model_response._hidden_params["created_at"] = time.time()
+        model_response._hidden_params = {
+            **model_response._hidden_params,
+            **self._hidden_params,
+        }
 
         if (
             len(model_response.choices) > 0
@@ -9226,10 +9253,6 @@ def process_response_headers(response_headers: Union[httpx.Headers, dict]) -> di
             processed_headers[k] = v
         else:
             additional_headers["{}-{}".format("llm_provider", k)] = v
-    ## GUARANTEE OPENAI HEADERS IN RESPONSE
-    for item in OPENAI_RESPONSE_HEADERS:
-        if item not in openai_headers:
-            openai_headers[item] = None
 
     additional_headers = {
         **openai_headers,

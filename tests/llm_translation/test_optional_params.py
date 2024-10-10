@@ -620,16 +620,28 @@ def test_o1_model_params():
     assert optional_params["user"] == "John"
 
 
+def test_azure_o1_model_params():
+    optional_params = get_optional_params(
+        model="o1-preview",
+        custom_llm_provider="azure",
+        seed=10,
+        user="John",
+    )
+    assert optional_params["seed"] == 10
+    assert optional_params["user"] == "John"
+
+
 @pytest.mark.parametrize(
     "temperature, expected_error",
-    [(0.2, True), (1, False)],
+    [(0.2, True), (1, False), (0, True)],
 )
-def test_o1_model_temperature_params(temperature, expected_error):
+@pytest.mark.parametrize("provider", ["openai", "azure"])
+def test_o1_model_temperature_params(provider, temperature, expected_error):
     if expected_error:
         with pytest.raises(litellm.UnsupportedParamsError):
             get_optional_params(
-                model="o1-preview-2024-09-12",
-                custom_llm_provider="openai",
+                model="o1-preview",
+                custom_llm_provider=provider,
                 temperature=temperature,
             )
     else:
@@ -650,3 +662,73 @@ def test_unmapped_gemini_model_params():
         stop="stop_word",
     )
     assert optional_params["stop_sequences"] == ["stop_word"]
+
+
+def _check_additional_properties(schema):
+    if isinstance(schema, dict):
+        # Remove the 'additionalProperties' key if it exists and is set to False
+        if "additionalProperties" in schema or "strict" in schema:
+            raise ValueError(
+                "additionalProperties and strict should not be in the schema"
+            )
+
+        # Recursively process all dictionary values
+        for key, value in schema.items():
+            _check_additional_properties(value)
+
+    elif isinstance(schema, list):
+        # Recursively process all items in the list
+        for item in schema:
+            _check_additional_properties(item)
+
+    return schema
+
+
+@pytest.mark.parametrize(
+    "provider, model",
+    [
+        ("hosted_vllm", "my-vllm-model"),
+        ("gemini", "gemini-1.5-pro"),
+        ("vertex_ai", "gemini-1.5-pro"),
+    ],
+)
+def test_drop_nested_params_add_prop_and_strict(provider, model):
+    """
+    Relevant issue - https://github.com/BerriAI/litellm/issues/5288
+
+    Relevant issue - https://github.com/BerriAI/litellm/issues/6136
+    """
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "structure_output",
+                "description": "Send structured output back to the user",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reasoning": {"type": "string"},
+                        "sentiment": {"type": "string"},
+                    },
+                    "required": ["reasoning", "sentiment"],
+                    "additionalProperties": False,
+                },
+                "additionalProperties": False,
+            },
+        }
+    ]
+    tool_choice = {"type": "function", "function": {"name": "structure_output"}}
+    optional_params = get_optional_params(
+        model=model,
+        custom_llm_provider=provider,
+        temperature=0.2,
+        tools=tools,
+        tool_choice=tool_choice,
+        additional_drop_params=[
+            ["tools", "function", "strict"],
+            ["tools", "function", "additionalProperties"],
+        ],
+    )
+
+    _check_additional_properties(optional_params["tools"])
