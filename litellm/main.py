@@ -2246,7 +2246,12 @@ def completion(  # type: ignore # noqa: PLR0915
                     additional_args={"headers": headers},
                 )
         elif custom_llm_provider == "openrouter":
-            api_base = api_base or litellm.api_base or "https://openrouter.ai/api/v1"
+            api_base = (
+                api_base
+                or litellm.api_base
+                or get_secret_str("OPENROUTER_API_BASE")
+                or "https://openrouter.ai/api/v1"
+            )
 
             api_key = (
                 api_key
@@ -2599,6 +2604,7 @@ def completion(  # type: ignore # noqa: PLR0915
                 encoding=encoding,
                 logging_obj=logging,
                 acompletion=acompletion,
+                client=client,
             )
 
             ## RESPONSE OBJECT
